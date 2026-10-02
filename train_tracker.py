@@ -32,37 +32,67 @@ TRIPS = [
     ("BARCELONE", "PARIS", d) for d in ("2027-01-01", "2027-01-02", "2027-01-03")
 ]
 
-# À ADAPTER : fais une recherche Paris->Barcelone sur sncf-connect.com, copie l'URL
-# des résultats, et remplace origine/destination/date par les placeholders.
-URL_TEMPLATE = "https://www.sncf-connect.com/CHANGE-ME?origin={origin}&destination={dest}&date={date}"
+HOME_URL = "https://www.sncf-connect.com/"
 # -----------------------------------------------------------------------
 
-TIME_RE = re.compile(r"\b([01]?\d|2[0-3])[:h]([0-5]\d)\b")
-PRICE_RE = re.compile(r"(\d{2,3}(?:[.,]\d{1,2})?)\s?€")
+API_MARK = "/bff/api/v1/itineraries/"
+
+
+def search_on_site(page, origin, dest, date):
+    """Remplit le formulaire de SNCF Connect. SÉLECTEURS À AJUSTER d'après debug.png / le journal."""
+    page.goto(HOME_URL, wait_until="domcontentloaded", timeout=60000)
+    for label in ("Tout accepter", "Accepter", "Continuer sans accepter"):
+        btn = page.get_by_role("button", name=label)
+        if btn.count():
+            btn.first.click()
+            break
+    page.get_by_label("Départ", exact=False).first.fill(origin.title())
+    page.get_by_role("option").first.click()
+    page.get_by_label("Arrivée", exact=False).first.fill(dest.title())
+    page.get_by_role("option").first.click()
+    page.get_by_label("Date", exact=False).first.fill(datetime.strptime(date, "%Y-%m-%d").strftime("%d/%m/%Y"))
+    page.get_by_role("button", name=re.compile("Rechercher", re.I)).first.click()
+
+
+def parse_proposals(payload, date):
+    """Extrait {"HH:MM": prix} des trains du jour demandé depuis la réponse JSON de SNCF Connect."""
+    out = {}
+    props = payload["output"]["longDistance"]["proposals"]["proposals"]
+    for pr in props:
+        day, hhmm = pr["travelId"][:10], pr["travelId"][11:16]   # ex. "2026-12-30T06:56_9711"
+        if day == date and pr.get("status", {}).get("isBookable", True):
+            out[hhmm] = float(pr["bestPrice"]["value"])
+    return out
 
 
 def fetch_prices(origin, dest, date):
-    """Retourne {"HH:MM": prix_float} pour un trajet. Best-effort : à ajuster
-    si SNCF Connect change son affichage."""
     from playwright.sync_api import sync_playwright
 
-    url = URL_TEMPLATE.format(origin=origin, dest=dest, date=date)
+    captured = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(locale="fr-FR")
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(4000)
-        # Chaque résultat = un bloc de texte contenant une heure de départ et un prix
-        blocks = page.locator("li, article, [role='listitem']").all_inner_texts()
+        page.on("response", lambda r: captured.append(r) if API_MARK in r.url else None)
+        try:
+            search_on_site(page, origin, dest, date)
+            page.wait_for_timeout(8000)
+        finally:
+            if not captured:
+                page.screenshot(path=f"debug-{origin}-{date}.png")
+        payloads = []
+        for r in captured:
+            try:
+                payloads.append(r.json())
+            except Exception:
+                pass
         browser.close()
 
     out = {}
-    for txt in blocks:
-        t, pr = TIME_RE.search(txt), PRICE_RE.findall(txt)
-        if t and pr:
-            hhmm = f"{int(t.group(1)):02d}:{t.group(2)}"
-            price = min(float(x.replace(",", ".")) for x in pr)
-            out.setdefault(hhmm, price)
+    for pl in payloads:
+        try:
+            out.update(parse_proposals(pl, date))
+        except (KeyError, TypeError):
+            continue
     return out
 
 
