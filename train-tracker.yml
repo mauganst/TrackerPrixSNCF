@@ -27,6 +27,13 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python train_tracker.py --once
+      - name: Captures d'écran de debug
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug
+          path: debug-*.png
+          if-no-files-found: ignore
       - name: Sauvegarder l'historique des prix
         run: |
           git config user.name "train-bot"
